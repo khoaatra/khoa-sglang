@@ -293,6 +293,13 @@ async fn v1_responses_list_input_items(
         .await
 }
 
+async fn v1_responses_query_all(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+) -> Response {
+    state.router.query_all_responses(Some(&headers)).await
+}
+
 async fn v1_conversations_create(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Value>,
@@ -605,6 +612,7 @@ pub fn build_app(
         .route("/get_loads", get(get_loads))
         .route("/parse/function_call", post(parse_function_call))
         .route("/parse/reasoning", post(parse_reasoning))
+        .route("/v1/responses/query_all", get(v1_responses_query_all))
         .route("/wasm", post(add_wasm_module))
         .route("/wasm/{module_uuid}", delete(remove_wasm_module))
         .route("/wasm", get(list_wasm_modules))

@@ -13,6 +13,7 @@ use axum::{
     extract::Request,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
 use dashmap::DashMap;
 use serde_json::Value;
@@ -651,6 +652,21 @@ impl RouterTrait for RouterManager {
             "responses api not yet implemented in inference gateway mode",
         )
             .into_response()
+    }
+
+    async fn query_all_responses(&self, headers: Option<&HeaderMap>) -> Response {
+        // Query all responses from the database using the default router
+        // This delegates to the actual router implementation that has database access
+        let router = self.select_router_for_request(headers, None);
+        if let Some(router) = router {
+            router.query_all_responses(headers).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available to query responses",
+            )
+                .into_response()
+        }
     }
 
     async fn list_response_input_items(

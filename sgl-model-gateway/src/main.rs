@@ -419,7 +419,7 @@ struct CliArgs {
     backend: Backend,
 
     /// History storage backend
-    #[arg(long, default_value = "memory", value_parser = ["memory", "none", "oracle","postgres"], help_heading = "Backend")]
+    #[arg(long, default_value = "memory", value_parser = ["memory", "none", "oracle","postgres", "oci_oracle"], help_heading = "Backend")]
     history_backend: String,
 
     /// Enable WebAssembly support
@@ -869,6 +869,7 @@ impl CliArgs {
             "none" => HistoryBackend::None,
             "oracle" => HistoryBackend::Oracle,
             "postgres" => HistoryBackend::Postgres,
+            "oci_oracle" => HistoryBackend::OciOracle,
             _ => HistoryBackend::Memory,
         };
 
@@ -879,6 +880,21 @@ impl CliArgs {
         };
         let postgres = if history_backend == HistoryBackend::Postgres {
             Some(self.build_postgres_config()?)
+        } else {
+            None
+        };
+        let oci_oracle = if history_backend == HistoryBackend::OciOracle {
+            // For OCI Oracle, we create a basic config that will be populated from environment variables
+            // in the factory. The actual configuration happens in create_oci_oracle_storage().
+            Some(smg::data_connector::OciOracleConfig {
+                username: String::new(), // Will be filled from env vars
+                connect_descriptor: String::new(), // Will be filled from env vars
+                wallet_path: None, // Will be filled from env vars
+                stage: "PRODUCTION".to_string(),
+                secret_path: "env://DB_PASSWORD".to_string(), // Will be filled from env vars
+                pool_max: 10,
+                pool_timeout_secs: 30,
+            })
         } else {
             None
         };
@@ -939,6 +955,7 @@ impl CliArgs {
             .maybe_chat_template(self.chat_template.as_ref())
             .maybe_oracle(oracle)
             .maybe_postgres(postgres)
+            .maybe_oci_oracle(oci_oracle)
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())

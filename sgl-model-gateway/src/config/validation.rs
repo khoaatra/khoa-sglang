@@ -39,6 +39,14 @@ impl ConfigValidator {
             }
         }
 
+        if config.history_backend == HistoryBackend::OciOracle {
+            if config.oci_oracle.is_none() {
+                return Err(ConfigError::MissingRequired {
+                    field: "oci_oracle".to_string(),
+                });
+            }
+        }
+
         Self::validate_tokenizer_cache(&config.tokenizer_cache)?;
 
         Ok(())

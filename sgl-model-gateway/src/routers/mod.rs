@@ -165,6 +165,15 @@ pub trait RouterTrait: Send + Sync + Debug {
             .into_response()
     }
 
+    /// Query all responses from the database (for testing OCI Oracle integration)
+    async fn query_all_responses(&self, _headers: Option<&HeaderMap>) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Query all responses not implemented",
+        )
+            .into_response()
+    }
+
     /// Route embedding requests (OpenAI-compatible /v1/embeddings)
     async fn route_embeddings(
         &self,

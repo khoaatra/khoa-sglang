@@ -10,7 +10,9 @@ use axum::{
 use futures_util::{stream, StreamExt};
 use reqwest::Client;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
+
+use chrono::Utc;
 
 use crate::{
     app_context::AppContext,
@@ -19,6 +21,7 @@ use crate::{
         is_retryable_status, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard,
         WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID,
     },
+    data_connector,
     observability::{
         events::{self, Event},
         metrics::{bool_to_static_str, metrics_labels, Metrics},
@@ -828,6 +831,154 @@ impl RouterTrait for Router {
             }
         } else {
             response
+        }
+    }
+
+    /// Query all responses from the database (for testing OCI Oracle integration)
+    async fn query_all_responses(&self, _headers: Option<&HeaderMap>) -> Response {
+        println!("DEBUG: query_all_responses endpoint called at {}", Utc::now());
+
+        // Log environment variables for debugging
+        println!("DEBUG: TNS_ADMIN={}", std::env::var("TNS_ADMIN").unwrap_or_else(|_| "NOT_SET".to_string()));
+        println!("DEBUG: DB_USER={}", std::env::var("DB_USER").unwrap_or_else(|_| "NOT_SET".to_string()));
+        println!("DEBUG: DB_CONNECT_STRING={}", std::env::var("DB_CONNECT_STRING").unwrap_or_else(|_| "NOT_SET".to_string()));
+
+        // Query the database directly for all responses
+        // This is a simplified implementation that queries the database directly
+
+        // For this demo, we'll implement a simple database query
+        // In a real implementation, this would use the storage layer
+        use std::env;
+        use oracle::Connection;
+
+        // Get database connection parameters from environment
+        let tns_admin = env::var("TNS_ADMIN").unwrap_or_else(|_| "/Users/khoatran/Downloads/Wallet_khoatestdb".to_string());
+        let username = env::var("DB_USER").unwrap_or_else(|_| "ADMIN".to_string());
+        let password = env::var("DB_PASSWORD").unwrap_or_else(|_| "112233445566Aa@".to_string());
+        let connect_string = env::var("DB_CONNECT_STRING").unwrap_or_else(|_| "tcps://adb.us-chicago-1.oraclecloud.com:1522/g9fe6ef5b169add_khoatestdb_high.adb.oraclecloud.com?ssl_server_dn_match=true".to_string());
+
+        // Configure Oracle client
+        if let Ok(tns_admin_path) = std::env::var("TNS_ADMIN") {
+            std::env::set_var("TNS_ADMIN", tns_admin_path);
+        }
+
+        // Connect to database and query responses
+        let responses_result = tokio::task::spawn_blocking(move || {
+            // Connect to database
+            let conn = Connection::connect(&username, &password, &connect_string)
+                .map_err(|e| format!("Database connection failed: {:?}", e))?;
+
+            // First, check what tables exist
+            let table_check_sql = "SELECT table_name FROM user_tables WHERE table_name LIKE '%RESPONSE%'";
+            match conn.query_row_as::<String>(table_check_sql, &[]) {
+                Ok(table_name) => {
+                    println!("DEBUG: Found RESPONSE table: {}", table_name);
+                }
+                Err(e) => {
+                    println!("DEBUG: No RESPONSE tables found: {:?}", e);
+                }
+            }
+
+            // Also check all tables
+            let all_tables_sql = "SELECT table_name FROM user_tables ORDER BY table_name";
+            match conn.query_row_as::<String>(all_tables_sql, &[]) {
+                Ok(first_table) => {
+                    println!("DEBUG: Sample table found: {}", first_table);
+                }
+                Err(e) => {
+                    println!("DEBUG: No tables found: {:?}", e);
+                }
+            }
+
+            // Count responses
+            let count_sql = "SELECT COUNT(*) FROM RESPONSES";
+            match conn.query_row_as::<i64>(count_sql, &[]) {
+                Ok(count) => {
+                    println!("DEBUG: Found {} responses in table", count);
+                }
+                Err(e) => {
+                    println!("DEBUG: Error counting responses: {:?}", e);
+                }
+            }
+
+            // Query all responses - try both uppercase and lowercase table name
+            let sql = r#"
+                SELECT RESPONSE_ID, CONVERSATION_STORE_ID, CONVERSATION_ID,
+                       PREVIOUS_RESPONSE_ID, INPUT_ITEMS, RESPONSE_OBJECT,
+                       MODEL, CREATED_AT, EXPIRES_AT
+                FROM RESPONSES
+                ORDER BY CREATED_AT DESC
+            "#;
+
+            let mut stmt = conn.statement(sql).build()
+                .map_err(|e| format!("Failed to prepare statement: {:?}", e))?;
+            let rows = stmt.query(&[])
+                .map_err(|e| format!("Query execution failed: {:?}", e))?;
+
+            let mut responses = Vec::new();
+
+            for row_result in rows {
+                let row = row_result.map_err(|e| format!("Row reading failed: {:?}", e))?;
+
+                let response_id: String = row.get(0).map_err(|e| format!("RESPONSE_ID read failed: {:?}", e))?;
+                let _conversation_store_id: Option<String> = row.get(1).map_err(|e| format!("CONVERSATION_STORE_ID read failed: {:?}", e))?;
+                let conversation_id: Option<String> = row.get(2).map_err(|e| format!("CONVERSATION_ID read failed: {:?}", e))?;
+                let previous_response_id: Option<String> = row.get(3).map_err(|e| format!("PREVIOUS_RESPONSE_ID read failed: {:?}", e))?;
+                let input_json: String = row.get(4).map_err(|e| format!("INPUT_ITEMS read failed: {:?}", e))?;
+                let response_json: String = row.get(5).map_err(|e| format!("RESPONSE_OBJECT read failed: {:?}", e))?;
+                let model: Option<String> = row.get(6).map_err(|e| format!("MODEL read failed: {:?}", e))?;
+                let created_at: chrono::DateTime<chrono::Utc> = row.get(7).map_err(|e| format!("CREATED_AT read failed: {:?}", e))?;
+                let _expires_at: chrono::DateTime<chrono::Utc> = row.get(8).map_err(|e| format!("EXPIRES_AT read failed: {:?}", e))?;
+
+                // Parse JSON fields
+                let input: serde_json::Value = serde_json::from_str(&input_json)
+                    .map_err(|e| format!("INPUT_ITEMS JSON parse failed: {}", e))?;
+                let output: serde_json::Value = serde_json::from_str(&response_json)
+                    .map_err(|e| format!("RESPONSE_OBJECT JSON parse failed: {}", e))?;
+
+                let response = data_connector::StoredResponse {
+                    id: data_connector::ResponseId(response_id),
+                    previous_response_id: previous_response_id.map(data_connector::ResponseId),
+                    input,
+                    instructions: None,
+                    output,
+                    tool_calls: Vec::new(),
+                    metadata: std::collections::HashMap::new(),
+                    created_at,
+                    safety_identifier: None,
+                    model,
+                    conversation_id,
+                    raw_response: serde_json::Value::Null,
+                };
+
+                responses.push(response);
+            }
+
+            Ok::<_, String>(responses)
+        }).await;
+
+        match responses_result {
+            Ok(Ok(responses)) => Json(responses).into_response(),
+            Ok(Err(e)) => {
+                error!("Failed to query responses from database: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Database query failed",
+                        "message": e
+                    }))
+                ).into_response()
+            }
+            Err(e) => {
+                error!("Task execution failed: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Internal server error",
+                        "message": format!("Task execution failed: {}", e)
+                    }))
+                ).into_response()
+            }
         }
     }
 
