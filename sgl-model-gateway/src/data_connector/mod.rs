@@ -14,6 +14,7 @@ mod memory;
 mod noop;
 mod oracle;
 mod postgres;
+mod oci_oracle;
 
 pub use core::{
     Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
@@ -23,3 +24,4 @@ pub use core::{
 
 pub use factory::create_storage;
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};
+pub use oci_oracle::{OciOracleConfig, OciOracleStore, DefaultSecretFetcher, SecretFetcher};

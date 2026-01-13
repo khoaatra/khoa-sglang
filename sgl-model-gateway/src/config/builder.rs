@@ -539,6 +539,14 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn maybe_oci_oracle(mut self, oci_oracle: Option<crate::data_connector::OciOracleConfig>) -> Self {
+        if let Some(cfg) = oci_oracle {
+            self.config.history_backend = HistoryBackend::OciOracle;
+            self.config.oci_oracle = Some(cfg);
+        }
+        self
+    }
+
     pub fn maybe_reasoning_parser(mut self, parser: Option<impl Into<String>>) -> Self {
         self.config.reasoning_parser = parser.map(|p| p.into());
         self

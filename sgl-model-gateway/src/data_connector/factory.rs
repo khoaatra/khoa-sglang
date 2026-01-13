@@ -12,12 +12,16 @@ use super::{
     memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage},
     noop::{NoOpConversationItemStorage, NoOpConversationStorage, NoOpResponseStorage},
     oracle::{OracleConversationItemStorage, OracleConversationStorage, OracleResponseStorage},
+    oci_oracle::{DefaultSecretFetcher, OciOracleStore},
 };
 use crate::{
     config::{HistoryBackend, OracleConfig, PostgresConfig, RouterConfig},
-    data_connector::postgres::{
-        PostgresConversationItemStorage, PostgresConversationStorage, PostgresResponseStorage,
-        PostgresStore,
+    data_connector::{
+        oci_oracle::OciOracleConfig,
+        postgres::{
+            PostgresConversationItemStorage, PostgresConversationStorage, PostgresResponseStorage,
+            PostgresStore,
+        },
     },
 };
 
@@ -73,6 +77,22 @@ pub fn create_storage(config: &RouterConfig) -> Result<StorageTuple, String> {
             info!("Data connector initialized successfully: Oracle ATP");
             Ok(storages)
         }
+        HistoryBackend::OciOracle => {
+            let oci_oracle_cfg = config
+                .oci_oracle
+                .clone()
+                .ok_or("OCI Oracle configuration is required when history_backend=oci_oracle")?;
+
+            info!(
+                "Initializing data connector: OCI Oracle ATP (pool_max: {})",
+                oci_oracle_cfg.pool_max
+            );
+
+            let storages = create_oci_oracle_storage(&oci_oracle_cfg)?;
+
+            info!("Data connector initialized successfully: OCI Oracle ATP");
+            Ok(storages)
+        }
         HistoryBackend::Postgres => {
             let postgres_cfg = config
                 .postgres
@@ -118,6 +138,34 @@ fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageTuple, Stri
         Arc::new(response_storage),
         Arc::new(conversation_storage),
         Arc::new(conversation_item_storage),
+    ))
+}
+
+fn create_oci_oracle_storage(oci_oracle_cfg: &OciOracleConfig) -> Result<StorageTuple, String> {
+    use super::oci_oracle::{DefaultSecretFetcher, OciOracleStore, OciOracleResponseStorage, OciOracleConversationStorage, OciOracleConversationItemStorage};
+
+    info!("Creating OCI Oracle storage with Agent Runtime schema");
+
+    // Build config from environment variables using the new fallback logic
+    let config = oci_oracle_cfg.clone().with_env_defaults()
+        .map_err(|e| format!("Failed to configure OCI Oracle from environment: {e}"))?;
+
+    // Create the store with Agent Runtime schema
+    let secret_fetcher = Arc::new(DefaultSecretFetcher);
+    let store = Arc::new(OciOracleStore::new_with_agent_runtime_schema(config, secret_fetcher)
+        .map_err(|e| format!("Failed to create OCI Oracle store: {e}"))?);
+
+    info!("OCI Oracle storage initialized successfully with Agent Runtime schema");
+
+    // Create actual OCI Oracle storage implementations
+    let response_storage = Arc::new(OciOracleResponseStorage::new(store.clone()));
+    let conversation_storage = Arc::new(OciOracleConversationStorage::new(store.clone()));
+    let conversation_item_storage = Arc::new(OciOracleConversationItemStorage::new(store));
+
+    Ok((
+        response_storage,
+        conversation_storage,
+        conversation_item_storage,
     ))
 }
 

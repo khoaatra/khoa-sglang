@@ -55,6 +55,9 @@ pub struct RouterConfig {
     /// Required when history_backend = "oracle"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oracle: Option<OracleConfig>,
+    /// Required when history_backend = "oci_oracle"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oci_oracle: Option<crate::data_connector::OciOracleConfig>,
     /// Required when history_backend = "postgres"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub postgres: Option<PostgresConfig>,
@@ -137,6 +140,7 @@ pub enum HistoryBackend {
     Memory,
     None,
     Oracle,
+    OciOracle,
     Postgres,
 }
 
@@ -578,6 +582,7 @@ impl Default for RouterConfig {
             chat_template: None,
             history_backend: default_history_backend(),
             oracle: None,
+            oci_oracle: None,
             postgres: None,
             reasoning_parser: None,
             tool_call_parser: None,
