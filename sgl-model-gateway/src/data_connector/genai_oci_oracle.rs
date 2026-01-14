@@ -406,8 +406,58 @@ pub(super) struct GenaiOciOracleConversationItemStorage {
 
 impl GenaiOciOracleConversationItemStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ConversationItemStorageError> {
-        let store = GenaiOciOracleStore::new(&config, |_| {
-            // Skip table creation for now to test connection
+        let store = GenaiOciOracleStore::new(&config, |conn| {
+            // Create conversation_items table
+            let exists_items: i64 = conn
+                .query_row_as(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEMS'",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+
+            if exists_items == 0 {
+                conn.execute(
+                    "CREATE TABLE conversation_items (
+                        id VARCHAR2(64) PRIMARY KEY,
+                        response_id VARCHAR2(64),
+                        item_type VARCHAR2(32) NOT NULL,
+                        role VARCHAR2(32),
+                        content CLOB,
+                        status VARCHAR2(32),
+                        created_at TIMESTAMP WITH TIME ZONE
+                    )",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+            }
+
+            // Create conversation_item_links table
+            let exists_links: i64 = conn
+                .query_row_as(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEM_LINKS'",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+
+            if exists_links == 0 {
+                conn.execute(
+                    "CREATE TABLE conversation_item_links (
+                        conversation_id VARCHAR2(64) NOT NULL,
+                        item_id VARCHAR2(64) NOT NULL,
+                        added_at TIMESTAMP WITH TIME ZONE,
+                        CONSTRAINT pk_conv_item_link PRIMARY KEY (conversation_id, item_id)
+                    )",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+
+                conn.execute(
+                    "CREATE INDEX conv_item_links_conv_idx ON conversation_item_links (conversation_id, added_at)",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+            }
+
             Ok(())
         })
         .map_err(ConversationItemStorageError::StorageError)?;
