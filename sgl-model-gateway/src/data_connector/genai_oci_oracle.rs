@@ -238,8 +238,30 @@ pub(super) struct GenaiOciOracleConversationStorage {
 
 impl GenaiOciOracleConversationStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ConversationStorageError> {
-        let store = GenaiOciOracleStore::new(&config, |_| {
-            // Skip table creation for now to test connection
+        let store = GenaiOciOracleStore::new(&config, |conn| {
+            // Check if CONVERSATIONS table exists
+            let exists_conversations: i64 = conn
+                .query_row_as(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+
+            if exists_conversations == 0 {
+                // Create CONVERSATIONS table
+                conn.execute(
+                    "CREATE TABLE conversations (
+                        conversation_id VARCHAR2(64) PRIMARY KEY,
+                        created_at TIMESTAMP WITH TIME ZONE,
+                        metadata CLOB,
+                        updated_at TIMESTAMP WITH TIME ZONE,
+                        expires_at TIMESTAMP WITH TIME ZONE
+                    )",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+            }
+
             Ok(())
         })
         .map_err(ConversationStorageError::StorageError)?;
@@ -761,8 +783,33 @@ pub(super) struct GenaiOciOracleResponseStorage {
 
 impl GenaiOciOracleResponseStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ResponseStorageError> {
-        let store = GenaiOciOracleStore::new(&config, |_| {
-            // Skip table creation for now to test connection
+        let store = GenaiOciOracleStore::new(&config, |conn| {
+            // Check if RESPONSES table exists
+            let exists_responses: i64 = conn
+                .query_row_as(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+
+            if exists_responses == 0 {
+                // Create RESPONSES table
+                conn.execute(
+                    "CREATE TABLE \"RESPONSES\" (
+                        \"RESPONSE_ID\" VARCHAR2(64) PRIMARY KEY,
+                        \"PREVIOUS_RESPONSE_ID\" VARCHAR2(64),
+                        \"INPUT_ITEMS\" CLOB,
+                        \"RESPONSE_OBJECT\" CLOB,
+                        \"MODEL\" VARCHAR2(128),
+                        \"CREATED_AT\" TIMESTAMP WITH TIME ZONE,
+                        \"CONVERSATION_ID\" VARCHAR2(64),
+                        \"EXPIRES_AT\" TIMESTAMP WITH TIME ZONE
+                    )",
+                    &[],
+                )
+                .map_err(map_genai_oci_oracle_error)?;
+            }
+
             Ok(())
         })
         .map_err(ResponseStorageError::StorageError)?;
