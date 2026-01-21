@@ -293,6 +293,7 @@ fn item_to_new_conversation_item(
             .get("status")
             .and_then(|v| v.as_str())
             .map(String::from),
+        conversation_id: None,
     }
 }
 

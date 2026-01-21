@@ -150,6 +150,21 @@ fn configure_genai_oci_oracle_client(config: &OracleConfig) -> Result<(), String
             ));
         }
 
+        // Update sqlnet.ora to replace placeholder directory with actual path
+        let sqlnet_path = path.join("sqlnet.ora");
+        if sqlnet_path.exists() {
+            let content = std::fs::read_to_string(&sqlnet_path)
+                .map_err(|e| format!("Failed to read sqlnet.ora: {}", e))?;
+
+            // Replace placeholder "?" with actual wallet directory
+            let updated_content = content.replace("DIRECTORY=\"?\"", &format!("DIRECTORY=\"{}\"", wallet_path));
+
+            if updated_content != content {
+                std::fs::write(&sqlnet_path, updated_content)
+                    .map_err(|e| format!("Failed to update sqlnet.ora: {}", e))?;
+            }
+        }
+
         std::env::set_var("TNS_ADMIN", wallet_path);
     }
     Ok(())
@@ -239,28 +254,26 @@ pub(super) struct GenaiOciOracleConversationStorage {
 impl GenaiOciOracleConversationStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ConversationStorageError> {
         let store = GenaiOciOracleStore::new(&config, |conn| {
-            // Check if CONVERSATIONS table exists
-            let exists_conversations: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
-                    &[],
-                )
-                .map_err(map_genai_oci_oracle_error)?;
+            // Use PL/SQL EXECUTE IMMEDIATE for conditional table creation
+            let create_table_sql = "
+                BEGIN
+                    EXECUTE IMMEDIATE q'[
+                        CREATE TABLE IF NOT EXISTS \"CONVERSATIONS\" (
+                            \"CONVERSATION_ID\" VARCHAR2(255) NOT NULL,
+                            \"CONVERSATION_STORE_ID\" VARCHAR2(255),
+                            \"CREATED_AT\" TIMESTAMP WITH TIME ZONE NOT NULL,
+                            \"METADATA\" CLOB,
+                            \"ITEMS\" CLOB,
+                            \"UPDATED_AT\" TIMESTAMP WITH TIME ZONE,
+                            \"EXPIRES_AT\" TIMESTAMP WITH TIME ZONE NOT NULL,
+                            CONSTRAINT PK_CONVERSATIONS_RECORD PRIMARY KEY (\"CONVERSATION_ID\")
+                        )
+                    ]';
+                END;
+            ";
 
-            if exists_conversations == 0 {
-                // Create CONVERSATIONS table
-                conn.execute(
-                    "CREATE TABLE conversations (
-                        conversation_id VARCHAR2(64) PRIMARY KEY,
-                        created_at TIMESTAMP WITH TIME ZONE,
-                        metadata CLOB,
-                        updated_at TIMESTAMP WITH TIME ZONE,
-                        expires_at TIMESTAMP WITH TIME ZONE
-                    )",
-                    &[],
-                )
+            conn.execute(create_table_sql, &[])
                 .map_err(map_genai_oci_oracle_error)?;
-            }
 
             Ok(())
         })
@@ -307,8 +320,8 @@ impl ConversationStorage for GenaiOciOracleConversationStorage {
         self.store
             .execute(move |conn| {
                 conn.execute(
-                    "INSERT INTO \"CONVERSATIONS\" (\"CONVERSATION_ID\", \"CREATED_AT\", \"METADATA\", \"EXPIRES_AT\") VALUES (:1, :2, :3, :4)",
-                    &[&id_str, &created_at, &metadata_json, &expires_at],
+                    "INSERT INTO \"CONVERSATIONS\" (\"CONVERSATION_ID\", \"CONVERSATION_STORE_ID\", \"CREATED_AT\", \"METADATA\", \"ITEMS\", \"EXPIRES_AT\") VALUES (:1, :2, :3, :4, :5, :6)",
+                    &[&id_str, &id_str, &created_at, &metadata_json, &"[]", &expires_at],
                 )
                 .map(|_| ())
                 .map_err(map_genai_oci_oracle_error)
@@ -428,61 +441,9 @@ pub(super) struct GenaiOciOracleConversationItemStorage {
 
 impl GenaiOciOracleConversationItemStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ConversationItemStorageError> {
-        let store = GenaiOciOracleStore::new(&config, |conn| {
-            // Create conversation_items table
-            let exists_items: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEMS'",
-                    &[],
-                )
-                .map_err(map_genai_oci_oracle_error)?;
-
-            if exists_items == 0 {
-                conn.execute(
-                    "CREATE TABLE conversation_items (
-                        id VARCHAR2(64) PRIMARY KEY,
-                        response_id VARCHAR2(64),
-                        item_type VARCHAR2(32) NOT NULL,
-                        role VARCHAR2(32),
-                        content CLOB,
-                        status VARCHAR2(32),
-                        created_at TIMESTAMP WITH TIME ZONE
-                    )",
-                    &[],
-                )
-                .map_err(map_genai_oci_oracle_error)?;
-            }
-
-            // Create conversation_item_links table
-            let exists_links: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEM_LINKS'",
-                    &[],
-                )
-                .map_err(map_genai_oci_oracle_error)?;
-
-            if exists_links == 0 {
-                conn.execute(
-                    "CREATE TABLE conversation_item_links (
-                        conversation_id VARCHAR2(64) NOT NULL,
-                        item_id VARCHAR2(64) NOT NULL,
-                        added_at TIMESTAMP WITH TIME ZONE,
-                        CONSTRAINT pk_conv_item_link PRIMARY KEY (conversation_id, item_id)
-                    )",
-                    &[],
-                )
-                .map_err(map_genai_oci_oracle_error)?;
-
-                conn.execute(
-                    "CREATE INDEX conv_item_links_conv_idx ON conversation_item_links (conversation_id, added_at)",
-                    &[],
-                )
-                .map_err(map_genai_oci_oracle_error)?;
-            }
-
-            Ok(())
-        })
-        .map_err(ConversationItemStorageError::StorageError)?;
+        // No schema initialization needed - items are stored in CONVERSATIONS table
+        let store = GenaiOciOracleStore::new(&config, |_| Ok(()))
+            .map_err(ConversationItemStorageError::StorageError)?;
 
         Ok(Self { store })
     }
@@ -494,12 +455,14 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
         &self,
         item: NewConversationItem,
     ) -> Result<ConversationItem, ConversationItemStorageError> {
+        let conversation_id = item.conversation_id.as_ref()
+            .ok_or_else(|| ConversationItemStorageError::StorageError("conversation_id required".to_string()))?;
+
         let id = item
             .id
             .clone()
             .unwrap_or_else(|| make_item_id(&item.item_type));
         let created_at = Utc::now();
-        let content_json = serde_json::to_string(&item.content)?;
 
         let conversation_item = ConversationItem {
             id: id.clone(),
@@ -511,20 +474,40 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
             created_at,
         };
 
-        let id_str = conversation_item.id.0.clone();
-        let response_id = conversation_item.response_id.clone();
-        let item_type = conversation_item.item_type.clone();
-        let role = conversation_item.role.clone();
-        let status = conversation_item.status.clone();
+        let cid = conversation_id.0.clone();
+        let item_json = serde_json::to_value(&conversation_item)
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
 
         self.store
             .execute(move |conn| {
+                // First, get the current items and check if conversation exists
+                let current_items_json: Option<String> = conn
+                    .query_row_as(
+                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
+                    )
+                    .map_err(map_genai_oci_oracle_error)
+                    .map_err(|e| format!("Failed to get conversation: {}", e))?;
+
+                let mut items_array: Vec<Value> = if let Some(json_str) = current_items_json {
+                    serde_json::from_str(&json_str).map_err(|e| e.to_string())?
+                } else {
+                    Vec::new()
+                };
+
+                // Add new item
+                items_array.push(item_json);
+
+                // Update the items column
+                let updated_items_json = serde_json::to_string(&items_array)
+                    .map_err(|e| e.to_string())?;
+
                 conn.execute(
-                    "INSERT INTO conversation_items (id, response_id, item_type, role, content, status, created_at) \
-                     VALUES (:1, :2, :3, :4, :5, :6, :7)",
-                    &[&id_str, &response_id, &item_type, &role, &content_json, &status, &created_at],
+                    "UPDATE \"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2 WHERE \"CONVERSATION_ID\" = :3",
+                    &[&updated_items_json, &Utc::now(), &cid],
                 )
                 .map_err(map_genai_oci_oracle_error)?;
+
                 Ok(())
             })
             .await
@@ -535,23 +518,12 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
 
     async fn link_item(
         &self,
-        conversation_id: &ConversationId,
-        item_id: &ConversationItemId,
-        added_at: DateTime<Utc>,
+        _conversation_id: &ConversationId,
+        _item_id: &ConversationItemId,
+        _added_at: DateTime<Utc>,
     ) -> Result<(), ConversationItemStorageError> {
-        let cid = conversation_id.0.clone();
-        let iid = item_id.0.clone();
-        self.store
-            .execute(move |conn| {
-                conn.execute(
-                    "INSERT INTO conversation_item_links (conversation_id, item_id, added_at) VALUES (:1, :2, :3)",
-                    &[&cid, &iid, &added_at],
-                )
-                .map_err(map_genai_oci_oracle_error)?;
-                Ok(())
-            })
-            .await
-            .map_err(ConversationItemStorageError::StorageError)
+        // Items are now embedded, so linking is implicit
+        Ok(())
     }
 
     async fn list_items(
@@ -560,119 +532,65 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
         params: ListParams,
     ) -> Result<Vec<ConversationItem>, ConversationItemStorageError> {
         let cid = conversation_id.0.clone();
-        let limit: i64 = params.limit as i64;
-        let order_desc = matches!(params.order, SortOrder::Desc);
-        let after_id = params.after.clone();
 
-        // Resolve the added_at of the after cursor if provided
-        let after_key: Option<(DateTime<Utc>, String)> = if let Some(ref aid) = after_id {
-            self.store
-                .execute({
-                    let cid = cid.clone();
-                    let aid = aid.clone();
-                    move |conn| {
-                        let mut stmt = conn
-                            .statement(
-                                "SELECT added_at FROM conversation_item_links WHERE conversation_id = :1 AND item_id = :2",
-                            )
-                            .build()
-                            .map_err(map_genai_oci_oracle_error)?;
-                        let mut rows = stmt.query(&[&cid, &aid]).map_err(map_genai_oci_oracle_error)?;
-                        if let Some(row_res) = rows.next() {
-                            let row = row_res.map_err(map_genai_oci_oracle_error)?;
-                            let ts: DateTime<Utc> = row.get(0).map_err(map_genai_oci_oracle_error)?;
-                            Ok(Some((ts, aid)))
-                        } else {
-                            Ok(None)
+        self.store
+            .execute(move |conn| {
+                let items_json: Option<String> = conn
+                    .query_row_as(
+                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
+                    )
+                    .map_err(map_genai_oci_oracle_error)
+                    .ok(); // Convert to Option - None if no row found
+
+                let items_array: Vec<Value> = if let Some(json_str) = items_json {
+                    serde_json::from_str(&json_str).map_err(|e| e.to_string())?
+                } else {
+                    Vec::new()
+                };
+
+                let mut conversation_items: Vec<ConversationItem> = Vec::new();
+                for item_value in items_array {
+                    let item: ConversationItem = serde_json::from_value(item_value)
+                        .map_err(|e| e.to_string())?;
+                    conversation_items.push(item);
+                }
+
+                // Apply sorting and pagination
+                let order_desc = matches!(params.order, SortOrder::Desc);
+                if order_desc {
+                    conversation_items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                } else {
+                    conversation_items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                }
+
+                // Apply cursor-based pagination
+                let mut result_items = Vec::new();
+                let mut skip = false;
+                if let Some(ref after_id) = params.after {
+                    for item in conversation_items {
+                        if skip {
+                            result_items.push(item);
+                        } else if item.id.0 == *after_id {
+                            skip = true;
+                        }
+                        if result_items.len() >= params.limit {
+                            break;
                         }
                     }
-                })
-                .await
-                .map_err(ConversationItemStorageError::StorageError)?
-        } else {
-            None
-        };
-
-        // Build the main list query
-        let rows: Vec<(String, Option<String>, String, Option<String>, Option<String>, Option<String>, DateTime<Utc>)> =
-            self.store
-                .execute({
-                    let cid = cid.clone();
-                    move |conn| {
-                        let mut sql = String::from(
-                            "SELECT i.id, i.response_id, i.item_type, i.role, i.content, i.status, i.created_at \
-                             FROM conversation_item_links l \
-                             JOIN conversation_items i ON i.id = l.item_id \
-                             WHERE l.conversation_id = :cid",
-                        );
-
-                        // Cursor predicate
-                        if let Some((_ts, _iid)) = &after_key {
-                            if order_desc {
-                                sql.push_str(" AND (l.added_at < :ats OR (l.added_at = :ats AND l.item_id < :iid))");
-                            } else {
-                                sql.push_str(" AND (l.added_at > :ats OR (l.added_at = :ats AND l.item_id > :iid))");
-                            }
+                } else {
+                    for item in conversation_items {
+                        result_items.push(item);
+                        if result_items.len() >= params.limit {
+                            break;
                         }
-
-                        // Order and limit
-                        if order_desc {
-                            sql.push_str(" ORDER BY l.added_at DESC, l.item_id DESC");
-                        } else {
-                            sql.push_str(" ORDER BY l.added_at ASC, l.item_id ASC");
-                        }
-                        sql.push_str(" FETCH NEXT :limit ROWS ONLY");
-
-                        // Build params and perform a named SELECT query
-                        let mut params_vec: Vec<(&str, &dyn ToSql)> = vec![("cid", &cid)];
-                        if let Some((ts, iid)) = &after_key {
-                            params_vec.push(("ats", ts));
-                            params_vec.push(("iid", iid));
-                        }
-                        params_vec.push(("limit", &limit));
-
-                        let rows_iter = conn.query_named(&sql, &params_vec).map_err(map_genai_oci_oracle_error)?;
-
-                        let mut out = Vec::new();
-                        for row_res in rows_iter {
-                            let row = row_res.map_err(map_genai_oci_oracle_error)?;
-                            let id: String = row.get(0).map_err(map_genai_oci_oracle_error)?;
-                            let resp_id: Option<String> = row.get(1).map_err(map_genai_oci_oracle_error)?;
-                            let item_type: String = row.get(2).map_err(map_genai_oci_oracle_error)?;
-                            let role: Option<String> = row.get(3).map_err(map_genai_oci_oracle_error)?;
-                            let content_raw: Option<String> = row.get(4).map_err(map_genai_oci_oracle_error)?;
-                            let status: Option<String> = row.get(5).map_err(map_genai_oci_oracle_error)?;
-                            let created_at: DateTime<Utc> = row.get(6).map_err(map_genai_oci_oracle_error)?;
-                            out.push((id, resp_id, item_type, role, content_raw, status, created_at));
-                        }
-                        Ok(out)
                     }
-                })
-                .await
-                .map_err(ConversationItemStorageError::StorageError)?;
+                }
 
-        // Map rows to ConversationItem
-        rows.into_iter()
-            .map(
-                |(id, resp_id, item_type, role, content_raw, status, created_at)| {
-                    let content = match content_raw {
-                        Some(s) => {
-                            serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?
-                        }
-                        None => Value::Null,
-                    };
-                    Ok(ConversationItem {
-                        id: ConversationItemId(id),
-                        response_id: resp_id,
-                        item_type,
-                        role,
-                        content,
-                        status,
-                        created_at,
-                    })
-                },
-            )
-            .collect()
+                Ok(result_items)
+            })
+            .await
+            .map_err(ConversationItemStorageError::StorageError)
     }
 
     async fn get_item(
@@ -681,45 +599,35 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
     ) -> Result<Option<ConversationItem>, ConversationItemStorageError> {
         let iid = item_id.0.clone();
 
+        // Since items are embedded in conversations, we need to find which conversation contains this item
+        // For now, we'll search across all conversations (this is inefficient but works for the migration)
         self.store
             .execute(move |conn| {
                 let mut stmt = conn
-                    .statement(
-                        "SELECT id, response_id, item_type, role, content, status, created_at \
-                         FROM conversation_items WHERE id = :1",
-                    )
+                    .statement("SELECT \"ITEMS\" FROM \"CONVERSATIONS\"")
                     .build()
                     .map_err(map_genai_oci_oracle_error)?;
+                let rows = stmt.query(&[]).map_err(map_genai_oci_oracle_error)?;
 
-                let mut rows = stmt.query(&[&iid]).map_err(map_genai_oci_oracle_error)?;
-
-                if let Some(row_res) = rows.next() {
+                for row_res in rows {
                     let row = row_res.map_err(map_genai_oci_oracle_error)?;
-                    let id: String = row.get(0).map_err(map_genai_oci_oracle_error)?;
-                    let response_id: Option<String> = row.get(1).map_err(map_genai_oci_oracle_error)?;
-                    let item_type: String = row.get(2).map_err(map_genai_oci_oracle_error)?;
-                    let role: Option<String> = row.get(3).map_err(map_genai_oci_oracle_error)?;
-                    let content_raw: Option<String> = row.get(4).map_err(map_genai_oci_oracle_error)?;
-                    let status: Option<String> = row.get(5).map_err(map_genai_oci_oracle_error)?;
-                    let created_at: DateTime<Utc> = row.get(6).map_err(map_genai_oci_oracle_error)?;
+                    let items_json: Option<String> = row.get(0).map_err(map_genai_oci_oracle_error)?;
 
-                    let content = match content_raw {
-                        Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
-                        None => Value::Null,
-                    };
+                    if let Some(json_str) = items_json {
+                        let items_array: Vec<Value> = serde_json::from_str(&json_str)
+                            .map_err(|e| e.to_string())?;
 
-                    Ok(Some(ConversationItem {
-                        id: ConversationItemId(id),
-                        response_id,
-                        item_type,
-                        role,
-                        content,
-                        status,
-                        created_at,
-                    }))
-                } else {
-                    Ok(None)
+                        for item_value in items_array {
+                            let item: ConversationItem = serde_json::from_value(item_value.clone())
+                                .map_err(|e| e.to_string())?;
+                            if item.id.0 == iid {
+                                return Ok(Some(item));
+                            }
+                        }
+                    }
                 }
+
+                Ok(None)
             })
             .await
             .map_err(ConversationItemStorageError::StorageError)
@@ -735,13 +643,28 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
 
         self.store
             .execute(move |conn| {
-                let count: i64 = conn
+                let items_json: Option<String> = conn
                     .query_row_as(
-                        "SELECT COUNT(*) FROM conversation_item_links WHERE conversation_id = :1 AND item_id = :2",
-                        &[&cid, &iid],
+                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
                     )
-                    .map_err(map_genai_oci_oracle_error)?;
-                Ok(count > 0)
+                    .map_err(map_genai_oci_oracle_error)
+                    .ok(); // Convert to Option - None if no row found
+
+                if let Some(json_str) = items_json {
+                    let items_array: Vec<Value> = serde_json::from_str(&json_str)
+                        .map_err(|e| e.to_string())?;
+
+                    for item_value in items_array {
+                        let item: ConversationItem = serde_json::from_value(item_value)
+                            .map_err(|e| e.to_string())?;
+                        if item.id.0 == iid {
+                            return Ok(true);
+                        }
+                    }
+                }
+
+                Ok(false)
             })
             .await
             .map_err(ConversationItemStorageError::StorageError)
@@ -757,11 +680,40 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
 
         self.store
             .execute(move |conn| {
+                // First, get the current items and check if conversation exists
+                let current_items_json: Option<String> = conn
+                    .query_row_as(
+                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
+                    )
+                    .map_err(map_genai_oci_oracle_error)
+                    .map_err(|e| format!("Failed to get conversation: {}", e))?;
+
+                let mut items_array: Vec<Value> = if let Some(json_str) = current_items_json {
+                    serde_json::from_str(&json_str).map_err(|e| e.to_string())?
+                } else {
+                    Vec::new()
+                };
+
+                // Remove the item
+                items_array.retain(|item_value| {
+                    if let Ok(item) = serde_json::from_value::<ConversationItem>(item_value.clone()) {
+                        item.id.0 != iid
+                    } else {
+                        true // Keep items that can't be parsed
+                    }
+                });
+
+                // Update the items column
+                let updated_items_json = serde_json::to_string(&items_array)
+                    .map_err(|e| e.to_string())?;
+
                 conn.execute(
-                    "DELETE FROM conversation_item_links WHERE conversation_id = :1 AND item_id = :2",
-                    &[&cid, &iid],
+                    "UPDATE \"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2 WHERE \"CONVERSATION_ID\" = :3",
+                    &[&updated_items_json, &Utc::now(), &cid],
                 )
                 .map_err(map_genai_oci_oracle_error)?;
+
                 Ok(())
             })
             .await
@@ -773,8 +725,8 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
 // PART 4: GenaiOciOracleResponseStorage
 // ============================================================================
 
-const SELECT_BASE: &str = "SELECT \"RESPONSE_ID\", \"PREVIOUS_RESPONSE_ID\", \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \
-    \"MODEL\", \"CREATED_AT\", \"CONVERSATION_ID\" FROM \"RESPONSES\"";
+const SELECT_BASE: &str = "SELECT \"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
+    \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\" FROM \"RESPONSES\"";
 
 #[derive(Clone)]
 pub(super) struct GenaiOciOracleResponseStorage {
@@ -784,31 +736,28 @@ pub(super) struct GenaiOciOracleResponseStorage {
 impl GenaiOciOracleResponseStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ResponseStorageError> {
         let store = GenaiOciOracleStore::new(&config, |conn| {
-            // Check if RESPONSES table exists
-            let exists_responses: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
-                    &[],
-                )
-                .map_err(map_genai_oci_oracle_error)?;
+            // Use EXECUTE IMMEDIATE for conditional table creation
+            let create_table_sql = "
+                BEGIN
+                    EXECUTE IMMEDIATE q'[
+                        CREATE TABLE IF NOT EXISTS \"RESPONSES\" (
+                            \"RESPONSE_ID\" VARCHAR2(255) NOT NULL,
+                            \"CONVERSATION_STORE_ID\" VARCHAR2(255),
+                            \"CONVERSATION_ID\" VARCHAR2(255),
+                            \"PREVIOUS_RESPONSE_ID\" VARCHAR2(255),
+                            \"INPUT_ITEMS\" CLOB NOT NULL CHECK (\"INPUT_ITEMS\" IS JSON),
+                            \"RESPONSE_OBJECT\" CLOB NOT NULL CHECK (\"RESPONSE_OBJECT\" IS JSON),
+                            \"MODEL\" VARCHAR2(255) NOT NULL,
+                            \"CREATED_AT\" TIMESTAMP WITH TIME ZONE NOT NULL,
+                            \"EXPIRES_AT\" TIMESTAMP WITH TIME ZONE NOT NULL,
+                            CONSTRAINT \"PK_RESPONSES_RECORD\" PRIMARY KEY (\"RESPONSE_ID\")
+                        )
+                    ]';
+                END;
+            ";
 
-            if exists_responses == 0 {
-                // Create RESPONSES table
-                conn.execute(
-                    "CREATE TABLE \"RESPONSES\" (
-                        \"RESPONSE_ID\" VARCHAR2(64) PRIMARY KEY,
-                        \"PREVIOUS_RESPONSE_ID\" VARCHAR2(64),
-                        \"INPUT_ITEMS\" CLOB,
-                        \"RESPONSE_OBJECT\" CLOB,
-                        \"MODEL\" VARCHAR2(128),
-                        \"CREATED_AT\" TIMESTAMP WITH TIME ZONE,
-                        \"CONVERSATION_ID\" VARCHAR2(64),
-                        \"EXPIRES_AT\" TIMESTAMP WITH TIME ZONE
-                    )",
-                    &[],
-                )
+            conn.execute(create_table_sql, &[])
                 .map_err(map_genai_oci_oracle_error)?;
-            }
 
             Ok(())
         })
@@ -821,12 +770,13 @@ impl GenaiOciOracleResponseStorage {
 
     fn build_response_from_row(row: &Row) -> Result<StoredResponse, String> {
         let id: String = row.get(0).map_err(map_genai_oci_oracle_error)?;
-        let previous: Option<String> = row.get(1).map_err(map_genai_oci_oracle_error)?;
-        let input_json: Option<String> = row.get(2).map_err(map_genai_oci_oracle_error)?;
-        let output_json: Option<String> = row.get(3).map_err(map_genai_oci_oracle_error)?;
-        let model: Option<String> = row.get(4).map_err(map_genai_oci_oracle_error)?;
-        let created_at: DateTime<Utc> = row.get(5).map_err(map_genai_oci_oracle_error)?;
-        let conversation_id: Option<String> = row.get(6).map_err(map_genai_oci_oracle_error)?;
+        // CONVERSATION_STORE_ID at index 1 (ignored)
+        let conversation_id: Option<String> = row.get(2).map_err(map_genai_oci_oracle_error)?;
+        let previous: Option<String> = row.get(3).map_err(map_genai_oci_oracle_error)?;
+        let input_json: Option<String> = row.get(4).map_err(map_genai_oci_oracle_error)?;
+        let output_json: Option<String> = row.get(5).map_err(map_genai_oci_oracle_error)?;
+        let model: Option<String> = row.get(6).map_err(map_genai_oci_oracle_error)?;
+        let created_at: DateTime<Utc> = row.get(7).map_err(map_genai_oci_oracle_error)?;
 
         let previous_response_id = previous.map(ResponseId);
         let input = parse_json_value(input_json)?;
@@ -875,17 +825,18 @@ impl ResponseStorage for GenaiOciOracleResponseStorage {
         self.store
             .execute(move |conn| {
                 conn.execute(
-                    "INSERT INTO \"RESPONSES\" (\"RESPONSE_ID\", \"PREVIOUS_RESPONSE_ID\", \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \
-                        \"MODEL\", \"CREATED_AT\", \"CONVERSATION_ID\", \"EXPIRES_AT\") \
-                     VALUES (:1, :2, :3, :4, :5, :6, :7, :8)",
+                    "INSERT INTO \"RESPONSES\" (\"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
+                        \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\") \
+                     VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9)",
                     &[
                         &response_id_str,
+                        &conversation_id, // CONVERSATION_STORE_ID defaults to same as CONVERSATION_ID
+                        &conversation_id,
                         &previous_id,
                         &json_input,
                         &json_output,
                         &model,
                         &created_at,
-                        &conversation_id,
                         &expires_at,
                     ],
                 )

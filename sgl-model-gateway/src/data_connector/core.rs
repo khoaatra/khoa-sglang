@@ -185,6 +185,7 @@ pub struct NewConversationItem {
     pub role: Option<String>,
     pub content: Value,
     pub status: Option<String>,
+    pub conversation_id: Option<ConversationId>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
