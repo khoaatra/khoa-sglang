@@ -295,9 +295,10 @@ async fn v1_responses_list_input_items(
 
 async fn v1_conversations_create(
     State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    conversations::create_conversation(&state.context.conversation_storage, body).await
+    conversations::create_conversation(&state.context.conversation_storage, body, Some(&headers)).await
 }
 
 async fn v1_conversations_get(

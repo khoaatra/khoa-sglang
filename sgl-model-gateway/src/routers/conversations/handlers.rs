@@ -20,7 +20,7 @@ use crate::{
     routers::persistence_utils::item_to_json,
 };
 
-// ============================================================================
+// ===========================================================================
 // Constants
 // ============================================================================
 
@@ -160,13 +160,22 @@ fn apply_metadata_patches(
 // Conversation CRUD Handlers
 // ============================================================================
 
-pub async fn create_conversation(storage: &Arc<dyn ConversationStorage>, body: Value) -> Response {
+pub async fn create_conversation(storage: &Arc<dyn ConversationStorage>, body: Value, headers: Option<&http::HeaderMap>) -> Response {
     let metadata = match validate_metadata(&body) {
         Ok(m) => m,
         Err(msg) => return bad_request(msg),
     };
 
-    let new_conv = NewConversation { id: None, metadata };
+    let conversation_store_id = headers
+        .and_then(|h| h.get("opc-conversation-store-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    let new_conv = NewConversation {
+        id: None,
+        metadata,
+        conversation_store_id,
+    };
 
     match storage.create_conversation(new_conv).await {
         Ok(conversation) => {
@@ -385,16 +394,8 @@ async fn process_item(
     let (item, warning) = if let Some(id_str) = user_provided_id {
         process_item_with_id(item_storage, conversation_id, item_val, id_str).await?
     } else {
-        process_new_item(item_storage, item_val).await?
+        process_new_item(item_storage, conversation_id, item_val).await?
     };
-
-    // Link item to conversation
-    if let Err(e) = item_storage
-        .link_item(conversation_id, &item.id, added_at)
-        .await
-    {
-        warn!("Failed to link item {}: {}", item.id.0, e);
-    }
 
     Ok((item_to_json(&item), warning))
 }
@@ -464,6 +465,7 @@ async fn process_item_with_id(
             // Create new item with the provided ID
             let (mut new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
             new_item.id = Some(item_id);
+            new_item.conversation_id = Some(conversation_id.clone());
 
             let created = item_storage
                 .create_item(new_item)
@@ -481,9 +483,11 @@ async fn process_item_with_id(
 /// Process a new item without a user-provided ID
 async fn process_new_item(
     item_storage: &Arc<dyn ConversationItemStorage>,
+    conversation_id: &ConversationId,
     item_val: &Value,
 ) -> Result<(ConversationItem, Option<String>), Response> {
-    let (new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
+    let (mut new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
+    new_item.conversation_id = Some(conversation_id.clone());
 
     let created = item_storage
         .create_item(new_item)
@@ -600,6 +604,11 @@ fn parse_item_from_value(
         .map(String::from)
         .or_else(|| Some("completed".to_string()));
 
+    let response_id = item_val
+        .get("response_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     let content = if item_type == "message" || item_type == "reasoning" {
         item_val.get("content").cloned().unwrap_or(json!([]))
     } else {
@@ -609,11 +618,12 @@ fn parse_item_from_value(
     Ok((
         NewConversationItem {
             id: None,
-            response_id: None,
+            response_id,
             item_type: item_type.to_string(),
             role,
             content,
             status,
+            conversation_id: None,
         },
         warning,
     ))

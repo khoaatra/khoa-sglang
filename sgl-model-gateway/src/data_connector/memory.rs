@@ -489,6 +489,7 @@ mod tests {
             role: role.map(|r| r.to_string()),
             content,
             status: Some("completed".to_string()),
+            conversation_id: None,
         }
     }
 
