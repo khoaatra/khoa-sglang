@@ -546,6 +546,7 @@ impl PostgresResponseStorage {
             safety_identifier,
             model,
             conversation_id,
+            conversation_store_id: None, // Old schema doesn't have this column
             raw_response,
         })
     }
