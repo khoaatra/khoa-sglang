@@ -136,6 +136,7 @@ fn get_string(json: &Value, key: &str) -> Option<String> {
 pub fn build_stored_response(
     response_json: &Value,
     original_body: &ResponsesRequest,
+    headers: Option<&http::HeaderMap>,
 ) -> StoredResponse {
     let mut stored = StoredResponse::new(None);
 
@@ -150,6 +151,12 @@ pub fn build_stored_response(
 
     stored.safety_identifier = original_body.user.clone();
     stored.conversation_id = original_body.conversation.clone();
+
+    let conversation_store_id = headers
+        .and_then(|h| h.get("opc-conversation-store-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    stored.conversation_store_id = conversation_store_id;
 
     stored.metadata = response_json
         .get("metadata")
@@ -333,6 +340,7 @@ pub async fn persist_conversation_items(
     response_storage: Arc<dyn ResponseStorage>,
     response_json: &Value,
     original_body: &ResponsesRequest,
+    headers: Option<&http::HeaderMap>,
 ) -> Result<(), String> {
     // Extract response ID
     let response_id_str = response_json
@@ -352,7 +360,7 @@ pub async fn persist_conversation_items(
         .ok_or_else(|| "No output array in response".to_string())?;
 
     // Build and store response
-    let mut stored_response = build_stored_response(response_json, original_body);
+    let mut stored_response = build_stored_response(response_json, original_body, headers);
     stored_response.id = response_id.clone();
     stored_response.input = Value::Array(input_items.clone());
     stored_response.output = Value::Array(output_items.clone());

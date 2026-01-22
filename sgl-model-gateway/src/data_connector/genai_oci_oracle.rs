@@ -11,10 +11,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool::managed::{Manager, Metrics, Pool, RecycleError, RecycleResult};
-use oracle::{
-    sql_type::{OracleType, ToSql},
-    Connection, Row,
-};
+use oracle::{Connection, Row};
 use serde_json::Value;
 
 use super::core::{
@@ -307,8 +304,9 @@ impl ConversationStorage for GenaiOciOracleConversationStorage {
         &self,
         input: NewConversation,
     ) -> Result<Conversation, ConversationStorageError> {
-        let conversation = Conversation::new(input);
+        let conversation = Conversation::new(input.clone());
         let id_str = conversation.id.0.clone();
+        let conversation_store_id = input.conversation_store_id.unwrap_or_else(|| id_str.clone());
         let created_at = conversation.created_at;
         let metadata_json = conversation
             .metadata
@@ -321,7 +319,7 @@ impl ConversationStorage for GenaiOciOracleConversationStorage {
             .execute(move |conn| {
                 conn.execute(
                     "INSERT INTO \"CONVERSATIONS\" (\"CONVERSATION_ID\", \"CONVERSATION_STORE_ID\", \"CREATED_AT\", \"METADATA\", \"ITEMS\", \"EXPIRES_AT\") VALUES (:1, :2, :3, :4, :5, :6)",
-                    &[&id_str, &id_str, &created_at, &metadata_json, &"[]", &expires_at],
+                    &[&id_str, &conversation_store_id, &created_at, &metadata_json, &"[]", &expires_at],
                 )
                 .map(|_| ())
                 .map_err(map_genai_oci_oracle_error)
@@ -770,7 +768,7 @@ impl GenaiOciOracleResponseStorage {
 
     fn build_response_from_row(row: &Row) -> Result<StoredResponse, String> {
         let id: String = row.get(0).map_err(map_genai_oci_oracle_error)?;
-        // CONVERSATION_STORE_ID at index 1 (ignored)
+        let conversation_store_id: Option<String> = row.get(1).map_err(map_genai_oci_oracle_error)?;
         let conversation_id: Option<String> = row.get(2).map_err(map_genai_oci_oracle_error)?;
         let previous: Option<String> = row.get(3).map_err(map_genai_oci_oracle_error)?;
         let input_json: Option<String> = row.get(4).map_err(map_genai_oci_oracle_error)?;
@@ -801,6 +799,7 @@ impl GenaiOciOracleResponseStorage {
             safety_identifier,
             model,
             conversation_id,
+            conversation_store_id,
             raw_response,
         })
     }
@@ -820,6 +819,7 @@ impl ResponseStorage for GenaiOciOracleResponseStorage {
         let model = response.model.clone();
         let created_at = response.created_at;
         let conversation_id = response.conversation_id.clone();
+        let conversation_store_id = response.conversation_store_id.or_else(|| conversation_id.clone());
         let expires_at = created_at + chrono::Duration::hours(24); // Default 24 hour expiration
 
         self.store
@@ -830,7 +830,7 @@ impl ResponseStorage for GenaiOciOracleResponseStorage {
                      VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9)",
                     &[
                         &response_id_str,
-                        &conversation_id, // CONVERSATION_STORE_ID defaults to same as CONVERSATION_ID
+                        &conversation_store_id,
                         &conversation_id,
                         &previous_id,
                         &json_input,

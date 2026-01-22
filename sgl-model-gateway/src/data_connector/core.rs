@@ -71,6 +71,9 @@ pub struct NewConversation {
     pub id: Option<ConversationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ConversationMetadata>,
+    /// Optional conversation store ID (defaults to conversation ID if not provided)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_store_id: Option<String>,
 }
 
 /// Stored conversation data structure
@@ -351,6 +354,10 @@ pub struct StoredResponse {
     #[serde(default)]
     pub conversation_id: Option<String>,
 
+    /// Conversation store ID (defaults to conversation_id if not provided)
+    #[serde(default)]
+    pub conversation_store_id: Option<String>,
+
     /// Raw OpenAI response payload
     #[serde(default)]
     pub raw_response: Value,
@@ -370,6 +377,7 @@ impl StoredResponse {
             safety_identifier: None,
             model: None,
             conversation_id: None,
+            conversation_store_id: None,
             raw_response: Value::Null,
         }
     }

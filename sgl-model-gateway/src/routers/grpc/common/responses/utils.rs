@@ -145,6 +145,7 @@ pub(crate) async fn persist_response_if_needed(
             response_storage,
             &response_json,
             original_request,
+            None, // TODO: pass headers when available
         )
         .await
         {
